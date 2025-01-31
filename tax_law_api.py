@@ -175,6 +175,7 @@ async def startup_event():
     rag_instance = TaxLawRAG(query_engine, openai_api_key)
     print("RAG system initialized successfully")
 
+
 @app.post("/query")
 async def query_tax_law(query: TaxQuery):
     if not rag_instance:
@@ -184,7 +185,29 @@ async def query_tax_law(query: TaxQuery):
         return {"response": response}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
+        
+@app.get("/")
+async def root():
+    return {
+        "message": "Tax Law API is running",
+        "status": "healthy",
+        "available_endpoints": [
+            {
+                "path": "/health",
+                "method": "GET",
+                "description": "Check API status"
+            },
+            {
+                "path": "/query",
+                "method": "POST",
+                "description": "Submit tax law query",
+                "request_body": {
+                    "query": "string - Your tax law question"
+                }
+            }
+        ],
+        "documentation": "Explore API endpoints and functionalities"
+    }
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
