@@ -12,13 +12,6 @@ import pinecone
 import json
 from dotenv import load_dotenv, find_dotenv
 
-# Load environment variables from .env file
-
-env_path = find_dotenv()
-if not env_path:
-    print("WARNING: .env file not found")
-#Load .env file if found
-load_dotenv(env_path)
 
 app = FastAPI(title="Tax Law RAG API")
 
