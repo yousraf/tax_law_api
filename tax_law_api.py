@@ -213,6 +213,6 @@ async def health_check():
     return {"status": "healthy"}
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
+    port = int(os.getenv("PORT", 10000))
     import uvicorn
     uvicorn.run("tax_law_api:app", host="0.0.0.0", port=port, reload=True)
