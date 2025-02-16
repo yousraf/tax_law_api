@@ -50,30 +50,34 @@ class TaxLawRAG:
         self.query_engine = query_engine
         self.llm = ChatOpenAI(
             openai_api_key=openai_api_key,
-            model="gpt-4o",
+            model="gpt-4",
             temperature=0.0
         )
 
     def generate_response_prompt(self, query: str, context: str) -> str:
-        return f"""You are a tax law advisor in Australia. Analyze the following query and provide a structured response with exactly six specific components:
+        return f"""You are a tax law advisor in Australia. Analyze this query and provide exactly six responses.
 
 Query: {query}
 
 Context: {context}
 
-Provide your response in the following format, with each section clearly marked by its header:
+Respond in exactly this format with these exact section headers:
 
-TITLE:
-[Provide a concise title summarizing the tax question or topic in 7 words or less]
+[TITLE]
+Write a concise title summarizing the tax question in 7 words or less.
 
-TAX_RESEARCH:
-[Provide detailed tax research and analysis with references to legislation sections, ATO rulings and interpretations, and latest tax information. Present as bullet points.]
+[TAX_RESEARCH]
+Write detailed tax research including:
+- Legislative references
+- ATO rulings and interpretations 
+- Latest tax information
+Present as bullet points.
 
-TAX_CITATIONS:
-[List relevant tax legislation sections and ATO rules with their titles and numbers]
+[TAX_CITATIONS] 
+List relevant tax legislation sections and ATO rules with titles and numbers.
 
-DRAFT_CLIENT_RESPONSE:
-[Provide a professional email response in this format:
+[DRAFT_CLIENT_RESPONSE]
+Write a professional email in this exact format:
 
 Dear [Client Name],
 
@@ -97,56 +101,75 @@ I refer to your query regarding [brief description].
 [Standard limitations]
 
 Yours sincerely,
-[Your Name]]
+[Your Name]
 
-CLARIFYING_QUESTIONS:
-[List specific questions needed to improve the tax analysis. If none needed, state "No further questions."]
+[CLARIFYING_QUESTIONS]
+List specific questions needed to improve the analysis. If none needed, write "No further questions."
 
-CONFIRMATION:
-[Provide a short confirmation message about whether the research and draft are complete]
+[CONFIRMATION]
+Write a short confirmation message about whether the research and draft are complete.
 
-Ensure each section is clearly marked with its header and separated by blank lines."""
+Important: Use the exact section headers shown in [brackets] above. Each section must start with its header on a new line."""
 
     def parse_response(self, response: str) -> TaxResponse:
+        # Initialize with default values
         sections = {
-            "TITLE": "",
-            "TAX_RESEARCH": "",
-            "TAX_CITATIONS": "",
-            "DRAFT_CLIENT_RESPONSE": "",
-            "CLARIFYING_QUESTIONS": "",
-            "CONFIRMATION": ""
+            "[TITLE]": "Untitled",
+            "[TAX_RESEARCH]": "No research provided",
+            "[TAX_CITATIONS]": "No citations provided",
+            "[DRAFT_CLIENT_RESPONSE]": "No draft provided",
+            "[CLARIFYING_QUESTIONS]": "No questions provided",
+            "[CONFIRMATION]": "No confirmation provided"
         }
         
+        # Split the response into sections
         current_section = None
         current_content = []
         
+        # Process each line
         for line in response.split('\n'):
-            line = line.strip()
-            if line.upper() in sections:
+            line_upper = line.strip()
+            # Check if this line is a section header
+            if line_upper in sections.keys():
+                # Save the previous section if it exists
                 if current_section:
                     sections[current_section] = '\n'.join(current_content).strip()
-                current_section = line.upper()
+                # Start new section
+                current_section = line_upper
                 current_content = []
-            elif current_section and line:
+            # If we're in a section and the line isn't empty, add it to current content
+            elif current_section and line.strip():
                 current_content.append(line)
-                
-        if current_section:
+        
+        # Save the last section
+        if current_section and current_content:
             sections[current_section] = '\n'.join(current_content).strip()
         
+        # Create response object
         return TaxResponse(
-            title=sections["TITLE"],
-            tax_research=sections["TAX_RESEARCH"],
-            tax_citations=sections["TAX_CITATIONS"],
-            draft_client_response=sections["DRAFT_CLIENT_RESPONSE"],
-            clarifying_questions=sections["CLARIFYING_QUESTIONS"],
-            confirmation=sections["CONFIRMATION"]
+            title=sections["[TITLE]"],
+            tax_research=sections["[TAX_RESEARCH]"],
+            tax_citations=sections["[TAX_CITATIONS]"],
+            draft_client_response=sections["[DRAFT_CLIENT_RESPONSE]"],
+            clarifying_questions=sections["[CLARIFYING_QUESTIONS]"],
+            confirmation=sections["[CONFIRMATION]"]
         )
 
     def answer_question(self, query: str) -> TaxResponse:
+        # Retrieve context
         context = self.query_engine.retrieve_context(query)
+        
+        # Generate response
         prompt = self.generate_response_prompt(query, context)
         response = self.llm.invoke(prompt)
-        return self.parse_response(response.content)
+        
+        # Parse and return response
+        try:
+            return self.parse_response(response.content)
+        except Exception as e:
+            print(f"Error parsing response: {str(e)}")
+            print(f"Raw response: {response.content}")
+            raise
 
 # Global RAG instance
 rag_instance = None
@@ -179,6 +202,7 @@ async def query_tax_law(query: TaxQuery):
         response = rag_instance.answer_question(query.query)
         return response
     except Exception as e:
+        print(f"Error processing query: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
