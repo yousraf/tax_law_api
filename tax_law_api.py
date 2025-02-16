@@ -50,7 +50,7 @@ class TaxLawRAG:
         self.query_engine = query_engine
         self.llm = ChatOpenAI(
             openai_api_key=openai_api_key,
-            model="gpt-4",
+            model="gpt-4o",
             temperature=0.0
         )
 
