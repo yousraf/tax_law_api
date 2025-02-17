@@ -1,10 +1,12 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Dict, Any, List
 import os
+import re
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_pinecone import PineconeVectorStore
 from dotenv import load_dotenv, find_dotenv
+from fastapi.responses import JSONResponse
 
 # Load environment variables
 #env_path = find_dotenv()
@@ -17,13 +19,9 @@ app = FastAPI(title="Tax Law RAG API")
 class TaxQuery(BaseModel):
     query: str
 
-class TaxResponse(BaseModel):
-    title: str
-    tax_research: str
-    tax_citations: str
-    draft_client_response: str
-    clarifying_questions: str
-    confirmation: str
+class Citation(BaseModel):
+    citations_name: str
+    citation_url: str
 
 class TaxLawQueryEngine:
     def __init__(self, index_name: str, openai_api_key: str, pinecone_api_key: str):
@@ -74,7 +72,10 @@ Write detailed tax research including:
 Present as bullet points.
 
 [TAX_CITATIONS] 
-List relevant tax legislation sections and ATO rules with titles and numbers.
+List relevant tax legislation sections and ATO rules with titles and numbers. Format each citation exactly as:
+"Citation Name | Citation URL" (one per line)
+Example: "ITAA 1997 26-47 | https://www.ato.gov.au/law/view/document?docid=PAC/19970038/26-47"
+
 
 [DRAFT_CLIENT_RESPONSE]
 Write a professional email in this exact format:
@@ -111,15 +112,43 @@ Write a short confirmation message about whether the research and draft are comp
 
 Important: Use the exact section headers shown in [brackets] above. Each section must start with its header on a new line."""
 
-    def parse_response(self, response: str) -> TaxResponse:
+    def extract_citations(self, citations_text: str) -> List[Dict[str, str]]:
+        """
+        Extract citations from text formatted as "Citation Name | Citation URL"
+        Returns a list of dictionaries in the required format
+        """
+        citations = []
+        for line in citations_text.strip().split('\n'):
+            if '|' in line:
+                parts = line.split('|', 1)
+                if len(parts) == 2:
+                    citation_name = parts[0].strip()
+                    citation_url = parts[1].strip()
+                    citations.append({
+                        "citations_name": citation_name,
+                        "citation_url": citation_url
+                    })
+        return citations
+
+    def parse_response(self, response: str) -> Dict[str, Any]:
         # Initialize with default values
         sections = {
-            "[TITLE]": "Untitled",
-            "[TAX_RESEARCH]": "No research provided",
-            "[TAX_CITATIONS]": "No citations provided",
-            "[DRAFT_CLIENT_RESPONSE]": "No draft provided",
-            "[CLARIFYING_QUESTIONS]": "No questions provided",
-            "[CONFIRMATION]": "No confirmation provided"
+            "title": "Untitled",
+            "tax_research": "No research provided",
+            "tax_citations": "No citations provided",
+            "draft_client_response": "No draft provided",
+            "clarifying_questions": "No questions provided",
+            "confirmation": "No confirmation provided"
+        }
+        
+        # Map section headers to JSON keys
+        header_to_key = {
+            "[TITLE]": "title",
+            "[TAX_RESEARCH]": "tax_research",
+            "[TAX_CITATIONS]": "tax_citations",
+            "[DRAFT_CLIENT_RESPONSE]": "draft_client_response",
+            "[CLARIFYING_QUESTIONS]": "clarifying_questions",
+            "[CONFIRMATION]": "confirmation"
         }
         
         # Split the response into sections
@@ -128,34 +157,30 @@ Important: Use the exact section headers shown in [brackets] above. Each section
         
         # Process each line
         for line in response.split('\n'):
-            line_upper = line.strip()
+            line_stripped = line.strip()
             # Check if this line is a section header
-            if line_upper in sections.keys():
+            if line_stripped in header_to_key:
                 # Save the previous section if it exists
-                if current_section:
-                    sections[current_section] = '\n'.join(current_content).strip()
+                if current_section and current_section in header_to_key:
+                    sections[header_to_key[current_section]] = '\n'.join(current_content).strip()
                 # Start new section
-                current_section = line_upper
+                current_section = line_stripped
                 current_content = []
             # If we're in a section and the line isn't empty, add it to current content
             elif current_section and line.strip():
                 current_content.append(line)
         
         # Save the last section
-        if current_section and current_content:
-            sections[current_section] = '\n'.join(current_content).strip()
+        if current_section and current_section in header_to_key and current_content:
+            sections[header_to_key[current_section]] = '\n'.join(current_content).strip()
         
-        # Create response object
-        return TaxResponse(
-            title=sections["[TITLE]"],
-            tax_research=sections["[TAX_RESEARCH]"],
-            tax_citations=sections["[TAX_CITATIONS]"],
-            draft_client_response=sections["[DRAFT_CLIENT_RESPONSE]"],
-            clarifying_questions=sections["[CLARIFYING_QUESTIONS]"],
-            confirmation=sections["[CONFIRMATION]"]
-        )
+        # Extract structured citations but don't add to the sections dict yet
+        # We'll handle it differently in the answer_question method
+        extracted_citations = self.extract_citations(sections["tax_citations"])
+        
+        return sections, extracted_citations
 
-    def answer_question(self, query: str) -> TaxResponse:
+    def answer_question(self, query: str) -> Dict[str, Any]:
         # Retrieve context
         context = self.query_engine.retrieve_context(query)
         
@@ -163,9 +188,15 @@ Important: Use the exact section headers shown in [brackets] above. Each section
         prompt = self.generate_response_prompt(query, context)
         response = self.llm.invoke(prompt)
         
-        # Parse and return response
+        # Parse response
         try:
-            return self.parse_response(response.content)
+            sections, citations = self.parse_response(response.content)
+            
+            # Create the response structure with citations as a separate field
+            result = sections.copy()
+            result["citations"] = citations
+            
+            return result
         except Exception as e:
             print(f"Error parsing response: {str(e)}")
             print(f"Raw response: {response.content}")
@@ -199,8 +230,14 @@ async def query_tax_law(query: TaxQuery):
     if not rag_instance:
         raise HTTPException(status_code=500, detail="RAG system not initialized")
     try:
-        response = rag_instance.answer_question(query.query)
-        return response
+        result = rag_instance.answer_question(query.query)
+        
+        # Ensure the result has the correct format for citations
+        if "citations" not in result or not isinstance(result["citations"], list):
+            result["citations"] = []
+            
+        # Return as JSONResponse to ensure proper JSON formatting
+        return JSONResponse(content=result)
     except Exception as e:
         print(f"Error processing query: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
