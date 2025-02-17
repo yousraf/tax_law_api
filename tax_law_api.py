@@ -1,12 +1,14 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Body, Request
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 import os
 import re
+import json
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_pinecone import PineconeVectorStore
 from dotenv import load_dotenv, find_dotenv
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 # Load environment variables
 #env_path = find_dotenv()
@@ -16,11 +18,20 @@ from fastapi.responses import JSONResponse
 
 app = FastAPI(title="Tax Law RAG API")
 
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all methods
+    allow_headers=["*"],  # Allow all headers
+)
+
 class TaxQuery(BaseModel):
     query: str
     promptTitle: Optional[str] = None
     promptResearch: Optional[str] = None
-    promptCitations: Optional[str] = None
+    promptCitations: Optional[str] = "Format each citation exactly as:\n\"Citation Name | Citation URL\" (one per line)\nExample: \"ITAA 1997 26-47 | https://www.ato.gov.au/law/view/document?docid=PAC/19970038/26-47\""
     promptClientResponse: Optional[str] = None
     promptClarifyingQuestions: Optional[str] = None
     promptConfirmation: Optional[str] = None
@@ -74,7 +85,7 @@ Respond in exactly this format with these exact section headers:
 {prompt_params.get('promptResearch', '')}
 
 [TAX_CITATIONS] 
-{prompt_params.get('promptCitations', '')}
+{prompt_params.get('promptCitations', 'Format each citation exactly as:\n"Citation Name | Citation URL" (one per line)\nExample: "ITAA 1997 26-47 | https://www.ato.gov.au/law/view/document?docid=PAC/19970038/26-47"')}
 
 [DRAFT_CLIENT_RESPONSE]
 {prompt_params.get('promptClientResponse', '')}
@@ -207,29 +218,48 @@ async def startup_event():
     print("RAG system initialized successfully")
 
 @app.post("/query")
-async def query_tax_law(query: TaxQuery):
+async def query_tax_law(request: Request):
     if not rag_instance:
         raise HTTPException(status_code=500, detail="RAG system not initialized")
     try:
-        # Extract prompt parameters from the request
+        # Parse request body
+        try:
+            body = await request.body()
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+        
+        # Log the received data for debugging
+        print(f"Received data: {data}")
+        
+        # Get the query from the request
+        query_text = data.get("query")
+        if not query_text:
+            # FlutterFlow might send the query as 'message'
+            query_text = data.get("message")
+            if not query_text:
+                raise HTTPException(status_code=400, detail="No query or message found in request")
+        
+        # Extract prompt parameters - ensure we have a default for promptCitations
         prompt_params = {
-            'promptTitle': query.promptTitle,
-            'promptResearch': query.promptResearch,
-            'promptCitations': query.promptCitations,
-            'promptClientResponse': query.promptClientResponse,
-            'promptClarifyingQuestions': query.promptClarifyingQuestions,
-            'promptConfirmation': query.promptConfirmation
+            'promptTitle': data.get('promptTitle'),
+            'promptResearch': data.get('promptResearch'),
+            'promptCitations': data.get('promptCitations', "Format each citation exactly as:\n\"Citation Name | Citation URL\" (one per line)\nExample: \"ITAA 1997 26-47 | https://www.ato.gov.au/law/view/document?docid=PAC/19970038/26-47\""),
+            'promptClientResponse': data.get('promptClientResponse'), 
+            'promptClarifyingQuestions': data.get('promptClarifyingQuestions'),
+            'promptConfirmation': data.get('promptConfirmation')
         }
         
         # Remove None values from prompt_params
         prompt_params = {k: v for k, v in prompt_params.items() if v is not None}
         
-        result = rag_instance.answer_question(query.query, prompt_params)
+        # Process the query
+        result = rag_instance.answer_question(query_text, prompt_params)
         
         # Ensure the result has the correct format for citations
         if "citations" not in result or not isinstance(result["citations"], list):
             result["citations"] = []
-            
+        
         # Return as JSONResponse to ensure proper JSON formatting
         return JSONResponse(content=result)
     except Exception as e:
