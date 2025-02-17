@@ -9,21 +9,15 @@ from dotenv import load_dotenv, find_dotenv
 from fastapi.responses import JSONResponse
 
 # Load environment variables
-#env_path = find_dotenv()
-#if not env_path:
-    #print("WARNING: .env file not found")
-#load_dotenv(env_path)
+env_path = find_dotenv()
+if not env_path:
+    print("WARNING: .env file not found")
+load_dotenv(env_path)
 
 app = FastAPI(title="Tax Law RAG API")
 
 class TaxQuery(BaseModel):
     query: str
-    promptTitle: Optional[str] = None
-    promptResearch: Optional[str] = None
-    promptCitations: Optional[str] = "Format each citation exactly as:\n\"Citation Name | Citation URL\" (one per line)\nExample: \"ITAA 1997 26-47 | https://www.ato.gov.au/law/view/document?docid=PAC/19970038/26-47\""
-    promptClientResponse: Optional[str] = None
-    promptClarifyingQuestions: Optional[str] = None
-    promptConfirmation: Optional[str] = None
 
 class Citation(BaseModel):
     citations_name: str
@@ -58,8 +52,8 @@ class TaxLawRAG:
             temperature=0.0
         )
 
-    def generate_response_prompt(self, query: str, context: str, prompt_params: Dict[str, str]) -> str:
-        base_prompt = f"""You are a tax law advisor in Australia. Analyze this query and provide exactly six responses.
+    def generate_response_prompt(self, query: str, context: str) -> str:
+        return f"""You are a tax law advisor in Australia. Analyze this query and provide exactly six responses.
 
 Query: {query}
 
@@ -68,26 +62,55 @@ Context: {context}
 Respond in exactly this format with these exact section headers:
 
 [TITLE]
-{prompt_params.get('promptTitle', '')}
+Write a concise title summarizing the tax question in 7 words or less.
 
 [TAX_RESEARCH]
-{prompt_params.get('promptResearch', '')}
+Write detailed tax research including:
+- Legislative references
+- ATO rulings and interpretations 
+- Latest tax information
+Present as bullet points.
 
 [TAX_CITATIONS] 
-{prompt_params.get('promptCitations', 'Format each citation exactly as:\n\"Citation Name | Citation URL\" (one per line)\nExample: \"ITAA 1997 26-47 | https://www.ato.gov.au/law/view/document?docid=PAC/19970038/26-47\"')}
+List relevant tax legislation sections and ATO rules with titles and numbers. Format each citation exactly as:
+"Citation Name | Citation URL" (one per line)
+Example: "ITAA 1997 26-47 | https://www.ato.gov.au/law/view/document?docid=PAC/19970038/26-47"
+
 
 [DRAFT_CLIENT_RESPONSE]
-{prompt_params.get('promptClientResponse', '')}
+Write a professional email in this exact format:
+
+Dear [Client Name],
+
+# [Title]
+
+I refer to your query regarding [brief description].
+
+## Background
+[Facts as bullet points]
+
+## Summary of Advice
+[Concise summary]
+
+## Detailed Analysis
+[Analysis with references]
+
+## Additional Comments
+[Standard comments]
+
+## Scope and Limitations
+[Standard limitations]
+
+Yours sincerely,
+[Your Name]
 
 [CLARIFYING_QUESTIONS]
-{prompt_params.get('promptClarifyingQuestions', '')}
+List specific questions needed to improve the analysis. If none needed, write "No further questions."
 
 [CONFIRMATION]
-{prompt_params.get('promptConfirmation', '')}
+Write a short confirmation message about whether the research and draft are complete.
 
 Important: Use the exact section headers shown in [brackets] above. Each section must start with its header on a new line."""
-
-        return base_prompt
 
     def extract_citations(self, citations_text: str) -> List[Dict[str, str]]:
         """
@@ -157,16 +180,12 @@ Important: Use the exact section headers shown in [brackets] above. Each section
         
         return sections, extracted_citations
 
-    def answer_question(self, query: str, prompt_params: Dict[str, str] = None) -> Dict[str, Any]:
-        # Set default prompt params if none provided
-        if prompt_params is None:
-            prompt_params = {}
-        
+    def answer_question(self, query: str) -> Dict[str, Any]:
         # Retrieve context
         context = self.query_engine.retrieve_context(query)
         
         # Generate response
-        prompt = self.generate_response_prompt(query, context, prompt_params)
+        prompt = self.generate_response_prompt(query, context)
         response = self.llm.invoke(prompt)
         
         # Parse response
@@ -211,20 +230,7 @@ async def query_tax_law(query: TaxQuery):
     if not rag_instance:
         raise HTTPException(status_code=500, detail="RAG system not initialized")
     try:
-        # Extract prompt parameters from the request
-        prompt_params = {
-            'promptTitle': query.promptTitle,
-            'promptResearch': query.promptResearch,
-            'promptCitations': query.promptCitations,
-            'promptClientResponse': query.promptClientResponse,
-            'promptClarifyingQuestions': query.promptClarifyingQuestions,
-            'promptConfirmation': query.promptConfirmation
-        }
-        
-        # Remove None values from prompt_params
-        prompt_params = {k: v for k, v in prompt_params.items() if v is not None}
-        
-        result = rag_instance.answer_question(query.query, prompt_params)
+        result = rag_instance.answer_question(query.query)
         
         # Ensure the result has the correct format for citations
         if "citations" not in result or not isinstance(result["citations"], list):
