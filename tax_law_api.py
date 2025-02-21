@@ -7,6 +7,7 @@ from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_pinecone import PineconeVectorStore
 from dotenv import load_dotenv, find_dotenv
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 # Load environment variables
 env_path = find_dotenv()
@@ -16,8 +17,23 @@ load_dotenv(env_path)
 
 app = FastAPI(title="Tax Law RAG API")
 
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
+
 class TaxQuery(BaseModel):
     query: str
+    title: str
+    tax_research: str
+    tax_citations: str
+    draft_client_response: str
+    clarifying_questions: str
+    confirmation: str
 
 class Citation(BaseModel):
     citations_name: str
@@ -35,13 +51,35 @@ class TaxLawQueryEngine:
             pinecone_api_key=pinecone_api_key
         )
 
-    def retrieve_context(self, query: str, k: int = 4) -> str:
+    def retrieve_context(self, query: str, k: int = 4) -> tuple:
         results = self.embedding_store.similarity_search(query, k=k)
         context = ""
+        sources = []
+        
         for result in results:
-            context += f"\nSection: {result.metadata['full_reference']}\n"
+            # Extract metadata for context and sources
+            full_reference = result.metadata.get('full_reference', 'Unknown Reference')
+            section_url = result.metadata.get('section_url', '')
+            source_url = result.metadata.get('source_url', '')
+            section = result.metadata.get('section', '')
+            
+            # Add to formatted context
+            context += f"\nSection: {full_reference}\n"
+            if section_url:
+                context += f"Section URL: {section_url}\n"
+            if source_url:
+                context += f"Source URL: {source_url}\n"
             context += f"{result.page_content}\n"
-        return context
+            
+            # Add to sources list for structured access
+            sources.append({
+                "full_reference": full_reference,
+                "section": section,
+                "section_url": section_url,
+                "source_url": source_url
+            })
+            
+        return context, sources
 
 class TaxLawRAG:
     def __init__(self, query_engine: TaxLawQueryEngine, openai_api_key: str):
@@ -52,65 +90,34 @@ class TaxLawRAG:
             temperature=0.0
         )
 
-    def generate_response_prompt(self, query: str, context: str) -> str:
+    def generate_response_prompt(self, query_params: TaxQuery, context: str) -> str:
         return f"""You are a tax law advisor in Australia. Analyze this query and provide exactly six responses.
 
-Query: {query}
+Query: {query_params.query}
 
 Context: {context}
+
+When citing sources, include both section URLs and source URLs when available. Format citations as "Citation Name | Citation URL" where the URL can be either the section URL or source URL, preferring section URL when available.
 
 Respond in exactly this format with these exact section headers:
 
 [TITLE]
-Write a concise title summarizing the tax question in 7 words or less.
+{query_params.title}
 
 [TAX_RESEARCH]
-Write detailed tax research including:
-- Legislative references
-- ATO rulings and interpretations 
-- Latest tax information
-Present as bullet points.
+{query_params.tax_research}
 
-[TAX_CITATIONS] 
-List relevant tax legislation sections and ATO rules with titles and numbers. Format each citation exactly as:
-"Citation Name | Citation URL" (one per line)
-Example: "ITAA 1997 26-47 | https://www.ato.gov.au/law/view/document?docid=PAC/19970038/26-47"
-
+[TAX_CITATIONS]
+{query_params.tax_citations}
 
 [DRAFT_CLIENT_RESPONSE]
-Write a professional email in this exact format:
-
-Dear [Client Name],
-
-# [Title]
-
-I refer to your query regarding [brief description].
-
-## Background
-[Facts as bullet points]
-
-## Summary of Advice
-[Concise summary]
-
-## Detailed Analysis
-[Analysis with references]
-
-## Additional Comments
-[Standard comments]
-
-## Scope and Limitations
-[Standard limitations]
-
-Yours sincerely,
-[Your Name]
+{query_params.draft_client_response}
 
 [CLARIFYING_QUESTIONS]
-List specific questions needed to improve the analysis. If none needed, write "No further questions."
+{query_params.clarifying_questions}
 
 [CONFIRMATION]
-Write a short confirmation message about whether the research and draft are complete.
-
-Important: Use the exact section headers shown in [brackets] above. Each section must start with its header on a new line."""
+{query_params.confirmation}"""
 
     def extract_citations(self, citations_text: str) -> List[Dict[str, str]]:
         """
@@ -180,21 +187,22 @@ Important: Use the exact section headers shown in [brackets] above. Each section
         
         return sections, extracted_citations
 
-    def answer_question(self, query: str) -> Dict[str, Any]:
-        # Retrieve context
-        context = self.query_engine.retrieve_context(query)
+    def answer_question(self, query_params: TaxQuery) -> Dict[str, Any]:
+        # Retrieve context and sources
+        context, sources = self.query_engine.retrieve_context(query_params.query)
         
         # Generate response
-        prompt = self.generate_response_prompt(query, context)
+        prompt = self.generate_response_prompt(query_params, context)
         response = self.llm.invoke(prompt)
         
         # Parse response
         try:
             sections, citations = self.parse_response(response.content)
             
-            # Create the response structure with citations as a separate field
+            # Create the response structure with citations and sources as separate fields
             result = sections.copy()
             result["citations"] = citations
+            result["sources"] = sources  # Add the structured source information
             
             return result
         except Exception as e:
@@ -226,11 +234,11 @@ async def startup_event():
     print("RAG system initialized successfully")
 
 @app.post("/query")
-async def query_tax_law(query: TaxQuery):
+async def query_tax_law(query_params: TaxQuery):
     if not rag_instance:
         raise HTTPException(status_code=500, detail="RAG system not initialized")
     try:
-        result = rag_instance.answer_question(query.query)
+        result = rag_instance.answer_question(query_params)
         
         # Ensure the result has the correct format for citations
         if "citations" not in result or not isinstance(result["citations"], list):
@@ -245,3 +253,8 @@ async def query_tax_law(query: TaxQuery):
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
+
+# Add this at the end of the file
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
